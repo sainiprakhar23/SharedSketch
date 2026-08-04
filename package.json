@@ -1,0 +1,24 @@
+{
+  "name": "collaborative-canvas",
+  "version": "1.0.0",
+  "description": "Real-time Collaborative Drawing Canvas Server",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "websocket",
+    "collaborative",
+    "canvas",
+    "drawing"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
+}
