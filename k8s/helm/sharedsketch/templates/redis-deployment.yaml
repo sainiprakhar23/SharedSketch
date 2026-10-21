@@ -71,7 +71,7 @@ spec:
   type: ClusterIP
   ports:
     - port: {{ .Values.redis.service.port }}
-      targetPort: redis
+      targetPort: {{ .Values.redis.service.port }}
       protocol: TCP
       name: redis
   selector:
