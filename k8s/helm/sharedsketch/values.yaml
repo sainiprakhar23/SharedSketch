@@ -101,12 +101,13 @@ redis:
     enabled: false
     # PVC disabled for lab environment; room state is ephemeral
 
-# Prometheus ServiceMonitor
+# Prometheus ServiceMonitor (enabled when kube-prometheus-stack is installed)
 metrics:
   enabled: true
   serviceMonitor:
-    enabled: true
+    enabled: false
     interval: 15s
+
     scrapeTimeout: 10s
     labels:
       release: prometheus
