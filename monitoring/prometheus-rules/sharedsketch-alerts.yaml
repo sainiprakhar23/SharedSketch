@@ -1,0 +1,63 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sharedsketch-alerts
+  labels:
+    role: alert-rules
+    release: prometheus
+    app.kubernetes.io/name: sharedsketch
+spec:
+  groups:
+    - name: sharedsketch.rules
+      rules:
+        - alert: SharedSketchAppDown
+          expr: up{job="sharedsketch"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "SharedSketch application instance is DOWN"
+            description: "No running SharedSketch pods are responding to Prometheus scrape for more than 1 minute."
+
+        - alert: SharedSketchHighHttpErrorRate
+          expr: |
+            sum(rate(sharedsketch_http_requests_total{status_code=~"5.."}[2m]))
+            /
+            sum(rate(sharedsketch_http_requests_total[2m])) > 0.05
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High HTTP 5xx error rate detected"
+            description: "HTTP 5xx error rate has exceeded 5% over the last 2 minutes."
+
+        - alert: SharedSketchHighRequestLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(sharedsketch_http_request_duration_seconds_bucket[5m])) by (le)) > 1.0
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High 95th percentile request latency"
+            description: "95% of HTTP requests are taking longer than 1 second to complete."
+
+        - alert: SharedSketchRedisStorageDown
+          expr: sharedsketch_storage_healthy == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Redis room storage dependency is DOWN"
+            description: "SharedSketch pods cannot connect to Redis; collaborative room state and cross-pod broadcasts are degraded."
+
+        - alert: SharedSketchHighMemoryUsage
+          expr: |
+            container_memory_working_set_bytes{container="sharedsketch"}
+            /
+            container_spec_memory_limit_bytes{container="sharedsketch"} > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod memory usage approaching limit"
+            description: "SharedSketch container is consuming more than 85% of its allocated memory limit."

@@ -8,7 +8,7 @@ class WebSocketManager {
         this.callbacks = {};
     }
 
-    connect(url = 'http://localhost:3000') {
+    connect(url = (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000')) {
         return new Promise((resolve, reject) => {
             try {
                 if (typeof io === 'undefined') {
@@ -29,7 +29,8 @@ class WebSocketManager {
     loadSocketIO(url) {
         return new Promise((resolve, reject) => {
             const script = document.createElement('script');
-            script.src = `${url}/socket.io/socket.io.js`;
+            const cleanUrl = url.replace(/\/$/, '');
+            script.src = `${cleanUrl}/socket.io/socket.io.js`;
             script.onload = resolve;
             script.onerror = reject;
             document.head.appendChild(script);
@@ -37,6 +38,10 @@ class WebSocketManager {
     }
 
     initSocket(url) {
+        if (this.socket) {
+            try { this.socket.disconnect(); } catch (e) { /* ignore */ }
+        }
+
         this.socket = io(url, {
             reconnection: true,
             reconnectionDelay: this.reconnectDelay,
@@ -49,6 +54,8 @@ class WebSocketManager {
     }
 
     setupListeners() {
+        if (!this.socket) return;
+
         this.socket.on('connect', () => {
             this.isConnected = true;
             this.reconnectAttempts = 0;
@@ -75,7 +82,7 @@ class WebSocketManager {
         });
 
         this.socket.on('reconnect_failed', () => {
-            console.log('Reconnection failed');
+            console.log('Failed to reconnect after maximum attempts');
             this.updateStatus(false);
         });
 
@@ -103,22 +110,27 @@ class WebSocketManager {
     }
 
     joinRoom(data) {
+        if (!this.socket) return;
         this.socket.emit('join-room', data);
     }
 
     sendDraw(data) {
+        if (!this.socket) return;
         this.socket.emit('draw', data);
     }
 
     sendDrawLine(data) {
+        if (!this.socket) return;
         this.socket.emit('draw-line', data);
     }
 
     clearCanvas() {
+        if (!this.socket) return;
         this.socket.emit('clear-canvas');
     }
 
     sendCursorMove(x, y) {
+        if (!this.socket) return;
         this.socket.emit('cursor-move', { x, y });
     }
 
@@ -134,10 +146,12 @@ class WebSocketManager {
     }
 
     sendRedo() {
+        if (!this.socket) return;
         this.socket.emit('redo');
     }
 
     ping() {
+        if (!this.socket) return;
         this.socket.emit('ping');
     }
 
@@ -146,6 +160,11 @@ class WebSocketManager {
             this.callbacks[event] = [];
         }
         this.callbacks[event].push(callback);
+    }
+
+    off(event, callback) {
+        if (!this.callbacks[event]) return;
+        this.callbacks[event] = this.callbacks[event].filter(fn => fn !== callback);
     }
 
     emit(event, data) {
@@ -179,3 +198,6 @@ class WebSocketManager {
 }
 
 const wsManager = new WebSocketManager();
+if (typeof window !== 'undefined') {
+    window.wsManager = wsManager;
+}

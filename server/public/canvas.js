@@ -1,3 +1,5 @@
+/* canvas.js - updated */
+
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const remoteCanvas = document.getElementById('remoteCanvas');
@@ -5,6 +7,7 @@ const remoteCtx = remoteCanvas.getContext('2d');
 
 function resizeCanvas() {
     const container = document.querySelector('.canvas-container');
+    if (!container) return;
     canvas.width = container.clientWidth;
     canvas.height = container.clientHeight;
     remoteCanvas.width = container.clientWidth;
@@ -44,28 +47,24 @@ function initCanvas() {
     const userNameDisplay = document.getElementById('userNameDisplay');
     const roomIdDisplay = document.getElementById('roomIdDisplay');
 
-    if (userNameDisplay) {
-        userNameDisplay.textContent = currentUser.name;
-    } else {
-        console.error('userNameDisplay element not found');
-    }
+    if (userNameDisplay) userNameDisplay.textContent = currentUser.name;
+    if (roomIdDisplay) roomIdDisplay.textContent = currentUser.roomId;
 
-    if (roomIdDisplay) {
-        roomIdDisplay.textContent = currentUser.roomId;
-    } else {
-        console.error('roomIdDisplay element not found');
-    }
-
+    // initial blank history snapshot
     saveHistory();
 
-    canvas.addEventListener('mousedown', startDrawing);
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseup', stopDrawing);
-    canvas.addEventListener('mouseout', stopDrawing);
+    // mouse events
+    if (canvas) {
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mousemove', handleMouseMove);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseout', stopDrawing);
 
-    canvas.addEventListener('touchstart', handleTouchStart);
-    canvas.addEventListener('touchmove', handleTouchMove);
-    canvas.addEventListener('touchend', stopDrawing);
+        // touch events (non-passive so we can preventDefault)
+        canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+        canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+        canvas.addEventListener('touchend', stopDrawing);
+    }
 
     connectWebSocket();
 
@@ -74,7 +73,7 @@ function initCanvas() {
 
 async function connectWebSocket() {
     try {
-        const SERVER_URL = 'https://real-time-collaborative-drawing-canvas-ni5j.onrender.com';
+        const SERVER_URL = localStorage.getItem('serverUrl') || window.location.origin;
         await wsManager.connect(SERVER_URL);
 
         wsManager.joinRoom({
@@ -82,7 +81,7 @@ async function connectWebSocket() {
             roomName: localStorage.getItem('roomName') || 'Room',
             userName: currentUser.name,
             userColor: currentUser.color,
-            capacity: localStorage.getItem('roomCapacity') || 5,
+            capacity: Number(localStorage.getItem('roomCapacity')) || 5,
             isHost: currentUser.isHost
         });
 
@@ -90,15 +89,19 @@ async function connectWebSocket() {
 
     } catch (error) {
         console.error('WebSocket connection failed:', error);
-        document.getElementById('statusDisplay').textContent = 'Connection Failed';
-        document.getElementById('statusDisplay').classList.add('error');
+        const statusEl = document.getElementById('statusDisplay');
+        if (statusEl) {
+            statusEl.textContent = 'Connection Failed';
+            statusEl.classList.add('error');
+        }
     }
 }
 
 function setupWebSocketListeners() {
     wsManager.on('users-list', (data) => {
+        if (!data || !Array.isArray(data.users)) return;
         data.users.forEach(user => {
-            if (user.id !== wsManager.socket.id) {
+            if (user.id !== wsManager.socket?.id) {
                 addRemoteUser(user.id, user.name, user.color);
             }
         });
@@ -106,22 +109,26 @@ function setupWebSocketListeners() {
     });
 
     wsManager.on('user-joined', (data) => {
+        if (!data) return;
         console.log(`${data.userName} joined the room`);
         addRemoteUser(data.userId, data.userName, data.userColor);
         updateUsersCount();
     });
 
     wsManager.on('user-left', (data) => {
+        if (!data) return;
         console.log(`User left the room`);
         removeRemoteUser(data.userId);
         updateUsersCount();
     });
 
     wsManager.on('remote-draw', (data) => {
+        if (!data) return;
         drawLineRemote(data.fromX, data.fromY, data.toX, data.toY, data.color, data.width, data.tool);
     });
 
     wsManager.on('remote-draw-line', (data) => {
+        if (!data) return;
         drawLineRemote(data.fromX, data.fromY, data.toX, data.toY, data.color, data.width, data.tool);
     });
 
@@ -131,118 +138,123 @@ function setupWebSocketListeners() {
         remoteCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
         history.length = 0;
         redoStack.length = 0;
-        history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+        saveHistory();
     });
 
     wsManager.on('full-history-update', (data) => {
         console.log('Full history update received');
-        
+
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         remoteCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
-        
+
         history.length = 0;
         redoStack.length = 0;
-        
-        if (data.history && data.history.length > 0) {
-            data.history.forEach((stroke, idx) => {
-                if (stroke.tool === 'eraser') {
-                    remoteCtx.clearRect(stroke.fromX - stroke.width / 2, stroke.fromY - stroke.width / 2, stroke.width, stroke.width);
-                    remoteCtx.clearRect(stroke.toX - stroke.width / 2, stroke.toY - stroke.width / 2, stroke.width, stroke.width);
-                } else if (stroke.tool === 'rectangle') {
-                    remoteCtx.strokeStyle = stroke.color;
-                    remoteCtx.lineWidth = stroke.width;
-                    remoteCtx.strokeRect(stroke.fromX, stroke.fromY, stroke.toX - stroke.fromX, stroke.toY - stroke.fromY);
-                } else if (stroke.tool === 'circle') {
-                    const radius = Math.sqrt(Math.pow(stroke.toX - stroke.fromX, 2) + Math.pow(stroke.toY - stroke.fromY, 2));
-                    remoteCtx.strokeStyle = stroke.color;
-                    remoteCtx.lineWidth = stroke.width;
-                    remoteCtx.beginPath();
-                    remoteCtx.arc(stroke.fromX, stroke.fromY, radius, 0, 2 * Math.PI);
-                    remoteCtx.stroke();
-                } else {
-                    remoteCtx.beginPath();
-                    remoteCtx.moveTo(stroke.fromX, stroke.fromY);
-                    remoteCtx.lineTo(stroke.toX, stroke.toY);
-                    remoteCtx.strokeStyle = stroke.color;
-                    remoteCtx.lineWidth = stroke.width;
-                    remoteCtx.lineCap = 'round';
-                    remoteCtx.lineJoin = 'round';
-                    remoteCtx.stroke();
-                    remoteCtx.closePath();
-                }
-                
-                if (stroke.tool === 'eraser') {
-                    ctx.clearRect(stroke.fromX - stroke.width / 2, stroke.fromY - stroke.width / 2, stroke.width, stroke.width);
-                    ctx.clearRect(stroke.toX - stroke.width / 2, stroke.toY - stroke.width / 2, stroke.width, stroke.width);
-                } else if (stroke.tool === 'rectangle') {
-                    ctx.strokeStyle = stroke.color;
-                    ctx.lineWidth = stroke.width;
-                    ctx.strokeRect(stroke.fromX, stroke.fromY, stroke.toX - stroke.fromX, stroke.toY - stroke.fromY);
-                } else if (stroke.tool === 'circle') {
-                    const radius = Math.sqrt(Math.pow(stroke.toX - stroke.fromX, 2) + Math.pow(stroke.toY - stroke.fromY, 2));
-                    ctx.strokeStyle = stroke.color;
-                    ctx.lineWidth = stroke.width;
-                    ctx.beginPath();
-                    ctx.arc(stroke.fromX, stroke.fromY, radius, 0, 2 * Math.PI);
-                    ctx.stroke();
-                } else {
-                    ctx.beginPath();
-                    ctx.moveTo(stroke.fromX, stroke.fromY);
-                    ctx.lineTo(stroke.toX, stroke.toY);
-                    ctx.strokeStyle = stroke.color;
-                    ctx.lineWidth = stroke.width;
-                    ctx.lineCap = 'round';
-                    ctx.lineJoin = 'round';
-                    ctx.stroke();
-                    ctx.closePath();
-                }
+
+        if (data && Array.isArray(data.history) && data.history.length > 0) {
+            data.history.forEach((stroke) => {
+                // draw to remote canvas and primary canvas to keep visuals consistent
+                drawStrokeFromHistory(remoteCtx, stroke);
+                drawStrokeFromHistory(ctx, stroke);
             });
         }
-        
-        history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+
+        saveHistory();
     });
 
     wsManager.on('drawing-history', (data) => {
+        if (!data || !Array.isArray(data.history)) return;
         data.history.forEach(stroke => {
             drawLineRemote(stroke.fromX, stroke.fromY, stroke.toX, stroke.toY, stroke.color, stroke.width, stroke.tool);
         });
     });
 
     wsManager.on('remote-cursor-move', (data) => {
+        if (!data) return;
         updateRemoteCursor(data.userId, data.x, data.y);
         if (remoteUsers.has(data.userId)) {
-            remoteUsers.get(data.userId).x = data.x;
-            remoteUsers.get(data.userId).y = data.y;
+            const u = remoteUsers.get(data.userId);
+            u.x = data.x;
+            u.y = data.y;
         }
     });
 
     wsManager.on('room-error', (data) => {
-        alert(data.message);
+        if (data && data.message) alert(data.message);
         window.location.href = 'index.html';
     });
 }
 
+function drawStrokeFromHistory(targetCtx, stroke) {
+    if (!targetCtx || !stroke) return;
+    const { fromX, fromY, toX, toY, color, width, tool } = stroke;
+
+    if (tool === 'eraser') {
+        targetCtx.clearRect(fromX - width / 2, fromY - width / 2, width, width);
+        targetCtx.clearRect(toX - width / 2, toY - width / 2, width, width);
+    } else if (tool === 'rectangle') {
+        targetCtx.strokeStyle = color;
+        targetCtx.lineWidth = width;
+        targetCtx.strokeRect(fromX, fromY, toX - fromX, toY - fromY);
+    } else if (tool === 'circle') {
+        const radius = Math.sqrt(Math.pow(toX - fromX, 2) + Math.pow(toY - fromY, 2));
+        targetCtx.strokeStyle = color;
+        targetCtx.lineWidth = width;
+        targetCtx.beginPath();
+        targetCtx.arc(fromX, fromY, radius, 0, 2 * Math.PI);
+        targetCtx.stroke();
+    } else {
+        targetCtx.beginPath();
+        targetCtx.moveTo(fromX, fromY);
+        targetCtx.lineTo(toX, toY);
+        targetCtx.strokeStyle = color;
+        targetCtx.lineWidth = width;
+        targetCtx.lineCap = 'round';
+        targetCtx.lineJoin = 'round';
+        targetCtx.stroke();
+        targetCtx.closePath();
+    }
+}
+
 function startDrawing(e) {
     isDrawing = true;
+
+    // record start coordinates
+    let clientX, clientY;
+    if (e.touches && e.touches.length > 0) {
+        clientX = e.touches[0].clientX;
+        clientY = e.touches[0].clientY;
+    } else {
+        clientX = e.clientX;
+        clientY = e.clientY;
+    }
+
     const rect = canvas.getBoundingClientRect();
-    startX = e.clientX - rect.left;
-    startY = e.clientY - rect.top;
+    startX = clientX - rect.left;
+    startY = clientY - rect.top;
 
-    currentStrokeId = `s-${Date.now()}-${Math.floor(Math.random()*100000)}`;
+    // new stroke id for grouping
+    currentStrokeId = `s-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
+    // Save the canvas before user starts drawing so undo can revert to previous state
+    saveHistory();
+
+    // For shapes we keep the snapshot and draw preview while moving
     if (currentTool === 'line' || currentTool === 'rectangle' || currentTool === 'circle') {
-        saveHistory();
+        // nothing else needed here; preview handled in mousemove
     }
 }
 
 function handleMouseMove(e) {
+    if (!canvas) return;
+
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    document.getElementById('posDisplay').textContent = `${Math.round(x)}, ${Math.round(y)}`;
+    const posEl = document.getElementById('posDisplay');
+    if (posEl) posEl.textContent = `${Math.round(x)}, ${Math.round(y)}`;
 
-    if (wsManager && wsManager.isSocketConnected()) {
+    if (wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
         wsManager.sendCursorMove(x, y);
     }
 
@@ -251,7 +263,7 @@ function handleMouseMove(e) {
     if (currentTool === 'brush') {
         drawLine(startX, startY, x, y, currentColor, currentStrokeWidth);
 
-        if (wsManager && wsManager.isSocketConnected()) {
+        if (wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
             wsManager.sendDraw({
                 fromX: startX,
                 fromY: startY,
@@ -263,13 +275,12 @@ function handleMouseMove(e) {
                 strokeId: currentStrokeId
             });
         }
-
         startX = x;
         startY = y;
     } else if (currentTool === 'eraser') {
         erase(x, y, currentStrokeWidth);
 
-        if (wsManager && wsManager.isSocketConnected()) {
+        if (wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
             wsManager.sendDraw({
                 fromX: startX,
                 fromY: startY,
@@ -281,16 +292,16 @@ function handleMouseMove(e) {
                 strokeId: currentStrokeId
             });
         }
-
         startX = x;
         startY = y;
     } else if (currentTool === 'line' || currentTool === 'rectangle' || currentTool === 'circle') {
+        // preview: restore last saved image and draw preview shape
         if (history.length > 0) {
             ctx.putImageData(history[history.length - 1], 0, 0);
         } else {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
-        
+
         if (currentTool === 'line') {
             drawLine(startX, startY, x, y, currentColor, currentStrokeWidth);
         } else if (currentTool === 'rectangle') {
@@ -302,20 +313,14 @@ function handleMouseMove(e) {
 }
 
 function handleTouchStart(e) {
-    const touch = e.touches[0];
-    const rect = canvas.getBoundingClientRect();
-    startX = touch.clientX - rect.left;
-    startY = touch.clientY - rect.top;
-    isDrawing = true;
-
-    currentStrokeId = `s-${Date.now()}-${Math.floor(Math.random()*100000)}`;
-
-    if (currentTool === 'line' || currentTool === 'rectangle' || currentTool === 'circle') {
-        saveHistory();
-    }
+    if (!e) return;
+    e.preventDefault();
+    startDrawing(e);
 }
 
 function handleTouchMove(e) {
+    if (!e) return;
+    e.preventDefault();
     if (!isDrawing) return;
 
     const touch = e.touches[0];
@@ -325,7 +330,7 @@ function handleTouchMove(e) {
 
     if (currentTool === 'brush') {
         drawLine(startX, startY, x, y, currentColor, currentStrokeWidth);
-        if (wsManager && wsManager.isSocketConnected()) {
+        if (wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
             wsManager.sendDraw({
                 fromX: startX,
                 fromY: startY,
@@ -341,7 +346,7 @@ function handleTouchMove(e) {
         startY = y;
     } else if (currentTool === 'eraser') {
         erase(x, y, currentStrokeWidth);
-        if (wsManager && wsManager.isSocketConnected()) {
+        if (wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
             wsManager.sendDraw({
                 fromX: startX,
                 fromY: startY,
@@ -355,30 +360,44 @@ function handleTouchMove(e) {
         }
         startX = x;
         startY = y;
-    }
+    } else {
+        // For shape preview use same logic as mousemove — restore snapshot and draw preview
+        if (history.length > 0) {
+            ctx.putImageData(history[history.length - 1], 0, 0);
+        } else {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
 
-    e.preventDefault();
+        if (currentTool === 'line') {
+            drawLine(startX, startY, x, y, currentColor, currentStrokeWidth);
+        } else if (currentTool === 'rectangle') {
+            drawRectangle(startX, startY, x, y, currentColor, currentStrokeWidth);
+        } else if (currentTool === 'circle') {
+            drawCircle(startX, startY, x, y, currentColor, currentStrokeWidth);
+        }
+    }
 }
 
 function stopDrawing(e) {
     if (!isDrawing) return;
     isDrawing = false;
 
-    if ((currentTool === 'line' || currentTool === 'rectangle' || currentTool === 'circle') && wsManager && wsManager.isSocketConnected()) {
-        let endX = startX;
-        let endY = startY;
-        
-        if (e) {
-            const rect = canvas.getBoundingClientRect();
-            if (e.clientX !== undefined) {
-                endX = e.clientX - rect.left;
-                endY = e.clientY - rect.top;
-            } else if (e.touches && e.touches.length > 0) {
-                endX = e.touches[0].clientX - rect.left;
-                endY = e.touches[0].clientY - rect.top;
-            }
+    // compute final end coordinates for shapes
+    const rect = canvas.getBoundingClientRect();
+    let endX = startX;
+    let endY = startY;
+
+    if (e) {
+        if (e.clientX !== undefined) {
+            endX = e.clientX - rect.left;
+            endY = e.clientY - rect.top;
+        } else if (e.changedTouches && e.changedTouches.length > 0) {
+            endX = e.changedTouches[0].clientX - rect.left;
+            endY = e.changedTouches[0].clientY - rect.top;
         }
-        
+    }
+
+    if ((currentTool === 'line' || currentTool === 'rectangle' || currentTool === 'circle') && wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
         wsManager.sendDrawLine({
             fromX: startX,
             fromY: startY,
@@ -387,10 +406,26 @@ function stopDrawing(e) {
             color: currentColor,
             width: currentStrokeWidth,
             tool: currentTool,
-            strokeId: `s-${Date.now()}-${Math.floor(Math.random()*100000)}`
+            strokeId: `s-${Date.now()}-${Math.floor(Math.random() * 100000)}`
         });
+
+        // draw final shape locally (ensure preview is committed)
+        if (history.length > 0) {
+            ctx.putImageData(history[history.length - 1], 0, 0);
+        } else {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        if (currentTool === 'line') {
+            drawLine(startX, startY, endX, endY, currentColor, currentStrokeWidth);
+        } else if (currentTool === 'rectangle') {
+            drawRectangle(startX, startY, endX, endY, currentColor, currentStrokeWidth);
+        } else if (currentTool === 'circle') {
+            drawCircle(startX, startY, endX, endY, currentColor, currentStrokeWidth);
+        }
     }
 
+    // commit final canvas state to history so undo works
     saveHistory();
 
     currentStrokeId = null;
@@ -457,62 +492,61 @@ function drawCircle(fromX, fromY, toX, toY, color, width) {
 
 function selectTool(tool) {
     currentTool = tool;
-
     document.querySelectorAll('.tool-btn').forEach(btn => btn.classList.remove('active'));
-    
     const toolButton = document.getElementById(tool + 'Tool');
-    if (toolButton) {
-        toolButton.classList.add('active');
-    }
+    if (toolButton) toolButton.classList.add('active');
+
+    const toolDisplay = document.getElementById('toolDisplay');
+    if (!toolDisplay) return;
 
     if (tool === 'brush') {
         canvas.style.cursor = 'crosshair';
-        document.getElementById('toolDisplay').textContent = 'Brush';
+        toolDisplay.textContent = 'Brush';
     } else if (tool === 'eraser') {
         canvas.style.cursor = 'cell';
-        document.getElementById('toolDisplay').textContent = 'Eraser';
+        toolDisplay.textContent = 'Eraser';
     } else if (tool === 'line') {
         canvas.style.cursor = 'crosshair';
-        document.getElementById('toolDisplay').textContent = 'Line';
+        toolDisplay.textContent = 'Line';
     } else if (tool === 'rectangle') {
         canvas.style.cursor = 'crosshair';
-        document.getElementById('toolDisplay').textContent = 'Rectangle';
+        toolDisplay.textContent = 'Rectangle';
     } else if (tool === 'circle') {
         canvas.style.cursor = 'crosshair';
-        document.getElementById('toolDisplay').textContent = 'Circle';
+        toolDisplay.textContent = 'Circle';
     }
 }
 
 function changeColor(color) {
     currentColor = color;
-    document.getElementById('colorPreview').style.background = color;
+    const preview = document.getElementById('colorPreview');
+    if (preview) preview.style.background = color;
 }
 
 function changeStrokeWidth(width) {
     currentStrokeWidth = width;
-    document.getElementById('strokeDisplay').textContent = width + 'px';
+    const sd = document.getElementById('strokeDisplay');
+    if (sd) sd.textContent = width + 'px';
 }
 
 function saveHistory() {
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    history.push(imageData);
+    try {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        history.push(imageData);
 
-    if (history.length > MAX_HISTORY) {
-        history.shift();
+        if (history.length > MAX_HISTORY) history.shift();
+
+        // clear redo stack when new history state is created
+        redoStack.length = 0;
+    } catch (err) {
+        console.warn('saveHistory() failed:', err);
     }
-
-    redoStack.length = 0;
 }
 
 function undoAction() {
     console.log('=== UNDO BUTTON CLICKED ===');
 
-    if (!wsManager) {
-        console.warn('No WebSocket manager available - cannot send undo');
-        return;
-    }
-
-    if (!wsManager.isSocketConnected || !wsManager.isSocketConnected()) {
+    if (!wsManager || typeof wsManager.isSocketConnected !== 'function' || !wsManager.isSocketConnected()) {
         console.warn('WebSocket not connected, cannot send undo');
         return;
     }
@@ -535,12 +569,7 @@ function undoAction() {
 function redoAction() {
     console.log('=== REDO BUTTON CLICKED ===');
 
-    if (!wsManager) {
-        console.warn('No WebSocket manager available - cannot send redo');
-        return;
-    }
-
-    if (!wsManager.isSocketConnected || !wsManager.isSocketConnected()) {
+    if (!wsManager || typeof wsManager.isSocketConnected !== 'function' || !wsManager.isSocketConnected()) {
         console.warn('WebSocket not connected, cannot send redo');
         return;
     }
@@ -561,20 +590,24 @@ function redoAction() {
 }
 
 function clearCanvas() {
-    if (confirm('Are you sure you want to clear the entire canvas?')) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        remoteCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
-        saveHistory();
+    if (!confirm('Are you sure you want to clear the entire canvas?')) return;
 
-        if (wsManager && wsManager.isSocketConnected()) {
-            wsManager.clearCanvas();
-        }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    remoteCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
+    saveHistory();
+
+    if (wsManager && typeof wsManager.isSocketConnected === 'function' && wsManager.isSocketConnected()) {
+        wsManager.clearCanvas();
     }
 }
 
 function redrawCanvas() {
     if (history.length > 0) {
-        ctx.putImageData(history[history.length - 1], 0, 0);
+        try {
+            ctx.putImageData(history[history.length - 1], 0, 0);
+        } catch (err) {
+            console.warn('redrawCanvas failed', err);
+        }
     }
 }
 
@@ -588,6 +621,7 @@ function downloadCanvas() {
 
 function toggleFullscreen() {
     const container = document.querySelector('.canvas-container');
+    if (!container) return;
     if (!document.fullscreenElement) {
         container.requestFullscreen().catch(err => console.log('Fullscreen error:', err));
     } else {
@@ -602,9 +636,11 @@ function generateUserColor() {
 
 function updateUsersCount() {
     const count = remoteUsers.size + 1;
-    document.getElementById('usersCount').textContent = count;
+    const usersCountEl = document.getElementById('usersCount');
+    if (usersCountEl) usersCountEl.textContent = count;
 
     const usersList = document.getElementById('usersList');
+    if (!usersList) return;
     usersList.innerHTML = '';
 
     const userBadge = document.createElement('span');
@@ -612,7 +648,7 @@ function updateUsersCount() {
     userBadge.textContent = `${currentUser.name} (You)`;
     usersList.appendChild(userBadge);
 
-    remoteUsers.forEach((user, userId) => {
+    remoteUsers.forEach((user) => {
         const badge = document.createElement('span');
         badge.className = 'user-badge';
         badge.style.borderLeft = `3px solid ${user.color}`;
@@ -634,13 +670,16 @@ function removeRemoteUser(userId) {
 }
 
 function updateRemoteCursor(userId, x, y) {
+    if (!userId) return;
     let cursor = document.getElementById(`cursor-${userId}`);
+
+    const user = remoteUsers.get(userId);
 
     if (!cursor) {
         cursor = document.createElement('div');
         cursor.id = `cursor-${userId}`;
         cursor.className = 'remote-cursor';
-        const user = remoteUsers.get(userId);
+
         const pointerDiv = document.createElement('div');
         pointerDiv.className = 'cursor-pointer';
         pointerDiv.style.borderColor = user ? user.color : '#7e22ce';
@@ -652,7 +691,9 @@ function updateRemoteCursor(userId, x, y) {
 
         cursor.appendChild(pointerDiv);
         cursor.appendChild(labelDiv);
-        document.getElementById('cursorsContainer').appendChild(cursor);
+
+        const container = document.getElementById('cursorsContainer');
+        if (container) container.appendChild(cursor);
     }
 
     cursor.style.left = (x - 10) + 'px';
@@ -660,16 +701,14 @@ function updateRemoteCursor(userId, x, y) {
 }
 
 function leaveRoom() {
-    if (confirm('Are you sure you want to leave this room?')) {
-        if (wsManager) {
-            wsManager.disconnect();
-        }
+    if (!confirm('Are you sure you want to leave this room?')) return;
 
-        localStorage.removeItem('userName');
-        localStorage.removeItem('roomId');
-        localStorage.removeItem('isHost');
-        window.location.href = 'index.html';
-    }
+    if (wsManager) wsManager.disconnect();
+
+    localStorage.removeItem('userName');
+    localStorage.removeItem('roomId');
+    localStorage.removeItem('isHost');
+    window.location.href = 'index.html';
 }
 
 document.addEventListener('DOMContentLoaded', () => {

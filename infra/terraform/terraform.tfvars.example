@@ -1,0 +1,16 @@
+# AWS Free Tier configuration for SharedSketch infrastructure.
+# Copy to terraform.tfvars and customize before running terraform plan.
+# NEVER commit real credentials, sensitive keys, or secrets into source control.
+
+aws_region          = "ap-south-1"
+environment         = "lab"
+
+# AWS Free Tier settings:
+instance_type       = "t3.micro"     # 100% Free Tier eligible (750 hours/month free)
+root_volume_size    = 30             # 100% Free Tier eligible (up to 30 GB EBS free/month)
+ecr_repository_name = "sharedsketch" # 500 MB Free Tier storage/month
+
+# Optional: Set your external IP CIDR (e.g., "203.0.113.50/32") if direct SSH is required.
+# Leave empty to keep port 22 closed and use AWS SSM Session Manager.
+trusted_ssh_cidr    = ""
+ssh_key_name        = ""

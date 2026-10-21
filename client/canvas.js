@@ -73,7 +73,7 @@ function initCanvas() {
 
 async function connectWebSocket() {
     try {
-        const SERVER_URL = localStorage.getItem('serverUrl') || window.location.origin || 'https://real-time-collaborative-drawing-canvas-ni5j.onrender.com';
+        const SERVER_URL = localStorage.getItem('serverUrl') || window.location.origin;
         await wsManager.connect(SERVER_URL);
 
         wsManager.joinRoom({

@@ -30,3 +30,11 @@ logs/
 # Temporary files
 temp/
 tmp/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+tfplan*
+*.plan
+

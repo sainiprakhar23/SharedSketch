@@ -6,6 +6,14 @@ const http = require('http');
 const socketIO = require('socket.io');
 const cors = require('cors');
 const path = require('path');
+const {
+    register,
+    metricsMiddleware,
+    activeConnections,
+    activeRooms,
+    socketEventsTotal
+} = require('./metrics');
+const { createRoomStore, setupRedisAdapter } = require('./storage');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,7 +25,8 @@ const io = socketIO(server, {
     }
 });
 
-// Basic middleware
+// Middleware
+app.use(metricsMiddleware);
 app.use(cors({
     origin: process.env.CORS_ORIGIN || '*'
 }));
@@ -26,93 +35,60 @@ app.use(express.json());
 // Serve client files from server/public
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Rooms data structure
-const rooms = new Map();
+// Room storage
+const REDIS_URL = process.env.REDIS_URL || null;
+const roomStore = createRoomStore(REDIS_URL);
+let redisAdapterInstance = null;
 
-function createRoom(roomId, roomName, capacity) {
-    if (!rooms.has(roomId)) {
-        rooms.set(roomId, {
-            roomId,
-            roomName,
-            capacity,
-            users: new Map(),
-            drawingHistory: [],
-            userRedoStacks: new Map(),
-            createdAt: new Date()
-        });
-        console.log(`Room created: ${roomName} (${roomId})`);
+async function initServerDependencies() {
+    await roomStore.init();
+    if (REDIS_URL) {
+        redisAdapterInstance = await setupRedisAdapter(io, REDIS_URL);
     }
-}
-
-function addUserToRoom(roomId, userId, userName, userColor) {
-    const room = rooms.get(roomId);
-    if (room && room.users.size < room.capacity) {
-        room.users.set(userId, {
-            id: userId,
-            name: userName,
-            color: userColor,
-            x: 0,
-            y: 0
-        });
-        console.log(`${userName} joined room ${roomId} (${room.users.size}/${room.capacity})`);
-        return true;
-    }
-    return false;
-}
-
-function removeUserFromRoom(roomId, userId) {
-    const room = rooms.get(roomId);
-    if (room) {
-        const user = room.users.get(userId);
-        if (user) {
-            room.users.delete(userId);
-            console.log(`${user.name} left room ${roomId}`);
-        }
-
-        if (room.users.size === 0) {
-            rooms.delete(roomId);
-            console.log(`Room deleted: ${roomId}`);
-        }
-    }
-}
-
-function getRoomUsers(roomId) {
-    const room = rooms.get(roomId);
-    if (room) {
-        return Array.from(room.users.values());
-    }
-    return [];
 }
 
 io.on('connection', (socket) => {
+    activeConnections.inc();
     console.log(`New connection: ${socket.id}`);
 
-    socket.on('join-room', (data) => {
+    socket.on('join-room', async (data) => {
+        socketEventsTotal.inc({ event_type: 'join-room' });
         const { roomId, roomName, userName, userColor, capacity, isHost } = data;
 
         if (isHost) {
-            createRoom(roomId, roomName, capacity);
+            await roomStore.createRoom(roomId, roomName, capacity);
+            const stats = await roomStore.getStats();
+            activeRooms.set(stats.totalRooms);
         }
 
-        const room = rooms.get(roomId);
+        const room = await roomStore.getRoom(roomId);
         if (!room) {
             socket.emit('room-error', { message: 'ERROR: Room not found' });
             return;
         }
 
-        if (room.users.size >= room.capacity) {
+        const usersCount = (await roomStore.getRoomUsers(roomId)).length;
+        if (usersCount >= room.capacity) {
             socket.emit('room-error', { message: 'ERROR: Room is full' });
             return;
         }
 
-        addUserToRoom(roomId, socket.id, userName, userColor);
+        const added = await roomStore.addUser(roomId, socket.id, {
+            name: userName,
+            color: userColor
+        });
+
+        if (!added) {
+            socket.emit('room-error', { message: 'ERROR: Could not join room' });
+            return;
+        }
 
         socket.join(roomId);
         socket.roomId = roomId;
         socket.userName = userName;
         socket.userColor = userColor;
 
-        const users = getRoomUsers(roomId);
+        const users = await roomStore.getRoomUsers(roomId);
         socket.emit('users-list', { users });
 
         socket.to(roomId).emit('user-joined', {
@@ -122,34 +98,26 @@ io.on('connection', (socket) => {
             users: users
         });
 
-        if (room.drawingHistory.length > 0) {
-            socket.emit('drawing-history', { history: room.drawingHistory });
+        const history = await roomStore.getDrawingHistory(roomId);
+        if (history.length > 0) {
+            socket.emit('drawing-history', { history });
         }
 
-        console.log(`Room ${roomId} has ${room.users.size} user(s)`);
+        console.log(`Room ${roomId} has ${users.length} user(s)`);
     });
 
-    socket.on('draw', (data) => {
+    socket.on('draw', async (data) => {
+        socketEventsTotal.inc({ event_type: 'draw' });
         if (!socket.roomId) return;
 
         const { fromX, fromY, toX, toY, color, width, tool, strokeId } = data;
 
         if (tool === 'brush' || tool === 'eraser') {
-            const room = rooms.get(socket.roomId);
-            if (room) {
-                room.drawingHistory.push({
-                    fromX, fromY, toX, toY, color, width, tool,
-                    userId: socket.id,
-                    strokeId: strokeId || null,
-                    timestamp: Date.now()
-                });
-
-                room.userRedoStacks.delete(socket.id);
-
-                if (room.drawingHistory.length > 1000) {
-                    room.drawingHistory.shift();
-                }
-            }
+            await roomStore.addDrawingStroke(socket.roomId, {
+                fromX, fromY, toX, toY, color, width, tool,
+                userId: socket.id,
+                strokeId: strokeId || null
+            });
         }
 
         socket.to(socket.roomId).emit('draw', {
@@ -166,20 +134,15 @@ io.on('connection', (socket) => {
         });
     });
 
-    socket.on('draw-line', (data) => {
+    socket.on('draw-line', async (data) => {
+        socketEventsTotal.inc({ event_type: 'draw-line' });
         if (!socket.roomId) return;
 
-        const room = rooms.get(socket.roomId);
-        if (room) {
-            room.drawingHistory.push({
-                ...data,
-                userId: socket.id,
-                strokeId: data.strokeId || null,
-                timestamp: Date.now()
-            });
-
-            room.userRedoStacks.delete(socket.id);
-        }
+        await roomStore.addDrawingStroke(socket.roomId, {
+            ...data,
+            userId: socket.id,
+            strokeId: data.strokeId || null
+        });
 
         socket.to(socket.roomId).emit('draw-line', {
             userId: socket.id,
@@ -188,32 +151,22 @@ io.on('connection', (socket) => {
         });
     });
 
-    socket.on('clear-canvas', () => {
+    socket.on('clear-canvas', async () => {
+        socketEventsTotal.inc({ event_type: 'clear-canvas' });
         if (!socket.roomId) return;
 
-        const room = rooms.get(socket.roomId);
-        if (room) {
-            room.drawingHistory = [];
-            room.userRedoStacks = new Map();
-            console.log(`Room ${socket.roomId} canvas cleared by ${socket.id}`);
+        await roomStore.clearDrawingHistory(socket.roomId);
+        console.log(`Room ${socket.roomId} canvas cleared by ${socket.id}`);
 
-            io.to(socket.roomId).emit('full-history-update', { history: room.drawingHistory });
-        }
+        io.to(socket.roomId).emit('full-history-update', { history: [] });
     });
 
-    socket.on('cursor-move', (data) => {
+    socket.on('cursor-move', async (data) => {
+        socketEventsTotal.inc({ event_type: 'cursor-move' });
         if (!socket.roomId) return;
 
         const { x, y } = data;
-
-        const room = rooms.get(socket.roomId);
-        if (room) {
-            const user = room.users.get(socket.id);
-            if (user) {
-                user.x = x;
-                user.y = y;
-            }
-        }
+        await roomStore.updateUserCursor(socket.roomId, socket.id, x, y);
 
         socket.to(socket.roomId).emit('cursor-move', {
             userId: socket.id,
@@ -224,117 +177,53 @@ io.on('connection', (socket) => {
         });
     });
 
-    socket.on('undo', () => {
-        console.log(`\n>>>>>>>>>>> UNDO RECEIVED FROM CLIENT <<<<<<<<<<<`);
-        console.log(`User ${socket.id} requested undo`);
+    socket.on('undo', async () => {
+        socketEventsTotal.inc({ event_type: 'undo' });
+        if (!socket.roomId) return;
 
-        if (!socket.roomId) {
-            console.log('No room ID, returning');
-            return;
-        }
-
-        const room = rooms.get(socket.roomId);
-        console.log(`Room found:`, !!room);
-        if (!room) return;
-
-        console.log(`Current history length: ${room.drawingHistory.length}`);
-        console.log(`Looking for last stroke group by userId: ${socket.id}`);
-
-        let targetStrokeId = null;
-        for (let i = room.drawingHistory.length - 1; i >= 0; i--) {
-            const stroke = room.drawingHistory[i];
-            if (stroke.userId === socket.id) {
-                targetStrokeId = stroke.strokeId || null;
-                break;
-            }
-        }
-
-        if (targetStrokeId === null) {
-            for (let i = room.drawingHistory.length - 1; i >= 0; i--) {
-                const stroke = room.drawingHistory[i];
-                if (stroke.userId === socket.id) {
-                    const removed = room.drawingHistory.splice(i, 1)[0];
-                    if (!room.userRedoStacks.has(socket.id)) room.userRedoStacks.set(socket.id, []);
-                    room.userRedoStacks.get(socket.id).push({ strokes: [removed] });
-                    console.log(`Removed single stroke (no strokeId) at index ${i}`);
-                    io.to(socket.roomId).emit('full-history-update', { history: room.drawingHistory });
-                    return;
-                }
-            }
-
-            console.log('No strokes found for user to undo');
-            return;
-        }
-
-        const removedGroup = [];
-        for (let i = room.drawingHistory.length - 1; i >= 0; i--) {
-            const stroke = room.drawingHistory[i];
-            if (stroke.userId === socket.id && stroke.strokeId === targetStrokeId) {
-                removedGroup.unshift(room.drawingHistory.splice(i, 1)[0]);
-            }
-        }
-
-        if (removedGroup.length > 0) {
-            if (!room.userRedoStacks.has(socket.id)) room.userRedoStacks.set(socket.id, []);
-            room.userRedoStacks.get(socket.id).push({ strokes: removedGroup });
-            console.log(`SUCCESS: Removed stroke group with id ${targetStrokeId}, items: ${removedGroup.length}`);
-
-            io.to(socket.roomId).emit('full-history-update', { history: room.drawingHistory });
-            console.log('Broadcasted full-history-update after undo');
-        } else {
-            console.log('No stroke group removed (maybe already undone)');
+        const { history, removedGroup } = await roomStore.undo(socket.roomId, socket.id);
+        if (removedGroup && removedGroup.length > 0) {
+            io.to(socket.roomId).emit('full-history-update', { history });
         }
     });
 
-    socket.on('redo', () => {
-        console.log(`\n>>>>>>>>>>> REDO RECEIVED FROM CLIENT <<<<<<<<<<<`);
-        console.log(`User ${socket.id} requested redo`);
+    socket.on('redo', async () => {
+        socketEventsTotal.inc({ event_type: 'redo' });
+        if (!socket.roomId) return;
 
-        if (!socket.roomId) {
-            console.log('No room ID, returning');
-            return;
-        }
-
-        const room = rooms.get(socket.roomId);
-        if (!room) return;
-
-        const userRedoStack = room.userRedoStacks.get(socket.id);
-        console.log(`User's redo stack has ${userRedoStack?.length || 0} items`);
-
-        if (userRedoStack && userRedoStack.length > 0) {
-            const group = userRedoStack.pop();
-            if (group && Array.isArray(group.strokes) && group.strokes.length > 0) {
-                group.strokes.forEach(st => room.drawingHistory.push(st));
-                console.log(`Restored group with ${group.strokes.length} strokes`);
-
-                io.to(socket.roomId).emit('full-history-update', { history: room.drawingHistory });
-                console.log('Broadcasted full-history-update after redo');
-            }
-        } else {
-            console.log('No items in redo stack');
+        const { history, restoredGroup } = await roomStore.redo(socket.roomId, socket.id);
+        if (restoredGroup && restoredGroup.length > 0) {
+            io.to(socket.roomId).emit('full-history-update', { history });
         }
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
+        activeConnections.dec();
         if (socket.roomId) {
-            removeUserFromRoom(socket.roomId, socket.id);
+            const { remainingUsers } = await roomStore.removeUser(socket.roomId, socket.id);
+            const users = await roomStore.getRoomUsers(socket.roomId);
 
-            const users = getRoomUsers(socket.roomId);
             io.to(socket.roomId).emit('user-left', {
                 userId: socket.id,
                 users: users
             });
+
+            if (remainingUsers === 0) {
+                const stats = await roomStore.getStats();
+                activeRooms.set(stats.totalRooms);
+            }
         }
 
         console.log(`User disconnected: ${socket.id}`);
     });
 
     socket.on('ping', () => {
+        socketEventsTotal.inc({ event_type: 'ping' });
         socket.emit('pong');
     });
 });
 
-// Serve index and canvas (from server/public)
+// HTTP Routes
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -343,37 +232,112 @@ app.get('/canvas', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'canvas.html'));
 });
 
+// Liveness probe (cheap check)
 app.get('/health', (req, res) => {
-    res.json({ status: 'Server is running' });
-});
-
-app.get('/stats', (req, res) => {
-    const stats = {
-        totalRooms: rooms.size,
-        totalUsers: Array.from(rooms.values()).reduce((sum, room) => sum + room.users.size, 0),
-        rooms: Array.from(rooms.values()).map(room => ({
-            roomId: room.roomId,
-            roomName: room.roomName,
-            users: room.users.size,
-            capacity: room.capacity
-        }))
-    };
-    res.json(stats);
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`
-   Collaborative Canvas Server
-Server running on port ${PORT}
-Stats: http://localhost:${PORT}/stats
-    `);
-});
-
-process.on('SIGTERM', () => {
-    console.log('Shutting down...');
-    server.close(() => {
-        console.log('Server closed');
-        process.exit(0);
+    res.status(200).json({
+        status: 'UP',
+        timestamp: new Date().toISOString()
     });
 });
+
+// Readiness probe (checks storage connectivity)
+app.get('/ready', async (req, res) => {
+    const isHealthy = await roomStore.isHealthy();
+    if (!isHealthy) {
+        return res.status(503).json({
+            status: 'NOT_READY',
+            checks: {
+                server: 'UP',
+                storage: 'DOWN',
+                storageType: roomStore.type
+            }
+        });
+    }
+
+    res.status(200).json({
+        status: 'READY',
+        checks: {
+            server: 'UP',
+            storage: 'UP',
+            storageType: roomStore.type
+        }
+    });
+});
+
+// Metrics probe for Prometheus scraping
+app.get('/metrics', async (req, res) => {
+    try {
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+    } catch (err) {
+        res.status(500).end(err.message);
+    }
+});
+
+// Safe aggregated stats (non-sensitive)
+app.get('/stats', async (req, res) => {
+    try {
+        const stats = await roomStore.getStats();
+        res.json(stats);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to retrieve stats' });
+    }
+});
+
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+
+let serverInstance = null;
+if (process.env.NODE_ENV !== 'test') {
+    initServerDependencies().then(() => {
+        serverInstance = server.listen(PORT, HOST, () => {
+            console.log(`
+   Collaborative Canvas Server
+Server running on http://${HOST}:${PORT}
+Storage: ${roomStore.type}
+Health:  http://${HOST}:${PORT}/health
+Ready:   http://${HOST}:${PORT}/ready
+Metrics: http://${HOST}:${PORT}/metrics
+Stats:   http://${HOST}:${PORT}/stats
+            `);
+        });
+    }).catch((err) => {
+        console.error('Failed to initialize server dependencies:', err);
+        process.exit(1);
+    });
+}
+
+async function shutdown(signal) {
+    console.log(`Received ${signal}. Shutting down gracefully...`);
+    if (serverInstance) {
+        serverInstance.close(async () => {
+            console.log('HTTP server closed.');
+            io.close(async () => {
+                console.log('Socket.IO server closed.');
+                if (redisAdapterInstance) {
+                    await redisAdapterInstance.close();
+                }
+                await roomStore.close();
+                process.exit(0);
+            });
+        });
+
+        setTimeout(() => {
+            console.error('Forced shutdown due to timeout.');
+            process.exit(1);
+        }, 10000).unref();
+    } else {
+        process.exit(0);
+    }
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+module.exports = {
+    app,
+    server,
+    io,
+    roomStore,
+    initServerDependencies
+};
